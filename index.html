@@ -36,8 +36,8 @@ canvas{max-width:100%;max-height:68vh;border:1px solid var(--line);border-radius
 <div class="app">
 <aside>
 <h1>Zig<b>·</b>Zag Intro</h1><div class="sub">Character reveal video maker — upload cut-outs, get the intro.</div>
-<div class="drop" id="drop">Drop transparent PNGs here<br><small>or tap to choose — as many as you like. File name becomes the character name.</small></div>
-<input type="file" id="file" accept="image/*" multiple hidden>
+<div class="drop" id="drop">Drop transparent PNGs or MP4 clips here<br><small>or tap to choose — as many as you like, images and videos can be mixed. File name becomes the character name.</small></div>
+<input type="file" id="file" accept="image/*,video/*,.mp4,.mov,.webm,.m4v" multiple hidden>
 <div class="chars" id="list"></div>
 
 <h2>Background (shared)</h2>
@@ -65,6 +65,7 @@ canvas{max-width:100%;max-height:68vh;border:1px solid var(--line);border-radius
 <label>Title animation<select id="tAnim"><option value="default">Fade up (original)</option><option value="random">Random letter pop</option><option value="type">Typewriter</option></select></label>
 
 <h2>Timing &amp; format</h2>
+<label>Loop video clips<input type="checkbox" id="vloop" checked></label>
 <label>Seconds per character<input type="range" id="dur" min="1" max="5" step="0.1" value="2"></label>
 <label>Frame<select id="ratio"><option value="1280x720">16:9 landscape</option><option value="720x1280">9:16 vertical</option><option value="1080x1080">1:1 square</option></select></label>
 <label>Export quality<select id="res"><option value="1080">1080p Full HD</option><option value="720">720p HD</option></select></label>
@@ -1964,17 +1965,41 @@ const O=()=>({bw:$('bw').checked,ac:$('ac').value,font:$('font').value,ns:+$('ns
 const total=()=>{const o=O();return Math.max(1,chars.length*o.dur+(o.tOn&&chars.length?TITLE:0))};
 
 /* ---------- uploads ---------- */
-const IMG_EXT=/\.(png|jpe?g|webp|gif|bmp|avif|svg|heic|heif)$/i,isImg=f=>(f.type&&f.type.startsWith('image/'))||IMG_EXT.test(f.name||'');
+const IMG_EXT=/\.(png|jpe?g|webp|gif|bmp|avif|svg|heic|heif)$/i,VID_EXT=/\.(mp4|m4v|mov|webm)$/i;
+const isVid=f=>(f.type&&f.type.startsWith('video/'))||VID_EXT.test(f.name||'');
+const isImg=f=>(f.type&&f.type.startsWith('image/'))||IMG_EXT.test(f.name||'');
 const msg=m=>{$('st').textContent=m};
-function addFiles(fs){const all=[...fs],ok=all.filter(isImg);
- if(all.length&&!ok.length)return msg('That file is not an image. Use PNG, JPG or WebP.');
- ok.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})).forEach(f=>{
- const url=URL.createObjectURL(f),im=new Image();
- im.onload=()=>{chars.push({img:im,url,name:f.name.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ').trim()});renderList();
-  if(chars.length===1&&t===0&&!playing){t=Math.min(1.2,total());ui()} /* show the first character clearly instead of a faint 0.0s frame */
-  draw()};
- im.onerror=()=>msg('Could not read "'+f.name+'" (format not supported by this browser — convert to PNG or JPG).');
- im.src=url});}
+const cleanName=n=>n.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ').trim();
+function firstShow(){if(chars.length===1&&t===0&&!playing){t=Math.min(1.2,total());ui();syncVideos(false)}} /* show the first character clearly instead of a faint 0.0s frame */
+function addFiles(fs){const all=[...fs],ok=all.filter(f=>isImg(f)||isVid(f));
+ if(all.length&&!ok.length)return msg('That file is not an image or video. Use PNG/JPG/WebP or MP4.');
+ /* load everything first, then add in file-name order (videos load slower than images) */
+ Promise.all(ok.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})).map(f=>isVid(f)?loadVideo(f):loadImage(f))).then(list=>{
+  list=list.filter(Boolean);if(!list.length)return;list.forEach(c=>chars.push(c));renderList();firstShow();draw()})}
+function loadImage(f){return new Promise(res=>{const url=URL.createObjectURL(f),im=new Image();
+ im.onload=()=>res({img:im,url,name:cleanName(f.name)});
+ im.onerror=()=>{msg('Could not read "'+f.name+'" (format not supported by this browser — convert to PNG or JPG).');res(null)};
+ im.src=url})}
+/* MP4 / video characters: a muted <video> is used like an image; its frame is chosen from the timeline (seek) so preview, scrubbing and export all match */
+function loadVideo(f){return new Promise(res=>{const url=URL.createObjectURL(f),v=document.createElement('video');
+ v.muted=true;v.playsInline=true;v.preload='auto';v.crossOrigin='anonymous';
+ let done=false;const fail=()=>{if(!done){done=true;msg('Could not read video "'+f.name+'" (codec not supported by this browser — try an H.264 MP4).');res(null)}};
+ v.onerror=fail;setTimeout(()=>{if(!done&&!v.videoWidth)fail()},8000);
+ v.onloadedmetadata=()=>{v.width=v.videoWidth;v.height=v.videoHeight;v.currentTime=Math.min(.1,(v.duration||1)/2)};
+ v.addEventListener('seeked',()=>{
+  if(!done){done=true;const c=document.createElement('canvas');c.width=c.height=88;const x=c.getContext('2d'),k=Math.min(88/v.videoWidth,88/v.videoHeight);
+   x.drawImage(v,(88-v.videoWidth*k)/2,(88-v.videoHeight*k)/2,v.videoWidth*k,v.videoHeight*k);
+   res({img:v,v,url:c.toDataURL('image/jpeg',.8),name:cleanName(f.name)})}
+  else if(!playing&&!exporting)draw()});
+ v.src=url;v.load()})}
+/* which frame of each video clip is needed at timeline time t: clip starts when its character first enters the scene */
+function vTime(c,j,D){const d=c.v.duration||1,lt=Math.max(0,t-Math.max(0,(j-1)*D));return $('vloop').checked?lt%d:Math.min(lt,Math.max(0,d-.05))}
+async function syncVideos(wait){const D=+$('dur').value,ps=[];
+ chars.forEach((c,j)=>{if(!c.v||t<(j-1)*D-.2||t>(j+7)*D)return;const tt=vTime(c,j,D);
+  if(Math.abs(c.v.currentTime-tt)<.02||(!wait&&c.v.seeking))return;
+  if(wait)ps.push(new Promise(r=>{const f=()=>{c.v.removeEventListener('seeked',f);r()};c.v.addEventListener('seeked',f);setTimeout(r,500)}));
+  c.v.currentTime=tt});
+ if(wait)await Promise.all(ps)}
 const drop=$('drop');drop.onclick=()=>$('file').click();$('file').onchange=e=>{addFiles(e.target.files);e.target.value=''};
 ['dragover','dragenter'].forEach(v=>drop.addEventListener(v,e=>{e.preventDefault();drop.classList.add('on')}));
 ['dragleave','drop'].forEach(v=>drop.addEventListener(v,e=>{e.preventDefault();drop.classList.remove('on')}));
@@ -2075,11 +2100,11 @@ function draw(){
  if(o.wm){ctx.save();ctx.font=`800 ${W/45}px Arial Black, Arial, sans-serif`;ctx.textAlign='right';ctx.fillStyle='rgba(120,255,180,.22)';ctx.fillText(o.wm.toUpperCase(),W*.96,H*.94);ctx.restore()}}
 
 /* ---------- playback ---------- */
-function loop(now){if(playing){t+=(now-last)/1000;last=now;if(t>=total()){t=total();stop()}ui();draw()}requestAnimationFrame(loop)}
+function loop(now){if(playing){t+=(now-last)/1000;last=now;if(t>=total()){t=total();stop()}ui();syncVideos(false);draw()}requestAnimationFrame(loop)}
 function ui(){$('scrub').value=t/total()*1000;$('tm').textContent=t.toFixed(1)+'s / '+total().toFixed(1)+'s'}
 function stop(){playing=false;aud.pause();$('play').textContent='▶ Play'}
 $('play').onclick=()=>{if(!chars.length||exporting)return;if(playing)return stop();if(t>=total()-.05)t=0;playing=true;last=performance.now();$('play').textContent='❚❚ Pause';if(aud.src){aud.currentTime=t;aud.play().catch(()=>{})}};
-$('scrub').oninput=e=>{t=e.target.value/1000*total();ui();draw()};
+$('scrub').oninput=e=>{t=e.target.value/1000*total();ui();syncVideos(false);draw()};
 requestAnimationFrame(loop);
 
 /* ---------- export ---------- */
@@ -2091,7 +2116,7 @@ $('exp').onclick=async()=>{
  const[W,H]=exportSize(),oW=cv.width,oH=cv.height,fps=30,T=total();cv.width=W;cv.height=H;
  try{const msg=(window.VideoEncoder&&window.Mp4Muxer)?await exportMp4(W,H,fps,T):await exportRec(W,H,T);setSt(msg)}
  catch(e){console.error(e);setSt('Export failed: '+(e.message||e)+' — use desktop Chrome.')}
- cv.width=oW;cv.height=oH;exporting=false;$('exp').disabled=false;t=0;ui();draw()};
+ cv.width=oW;cv.height=oH;exporting=false;$('exp').disabled=false;t=0;ui();syncVideos(false);draw()};
 async function exportMp4(W,H,fps,T){
  const N=Math.ceil(T*fps),bps=W*H>1.5e6?12e6:7e6;let cfg=null,err=null;
  for(const c of['avc1.640033','avc1.640028','avc1.4d0028','avc1.42001f']){const k={codec:c,width:W,height:H,bitrate:bps,framerate:fps};try{if((await VideoEncoder.isConfigSupported(k)).supported){cfg=k;break}}catch(e){}}
@@ -2104,7 +2129,7 @@ async function exportMp4(W,H,fps,T){
  const muxer=new Mp4Muxer.Muxer({target:new Mp4Muxer.ArrayBufferTarget(),video:{codec:'avc',width:W,height:H},...(aBuf?{audio:{codec:'aac',sampleRate:48000,numberOfChannels:2}}:{}),fastStart:'in-memory'});
  const ve=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>err=e});ve.configure(cfg);
  for(let i=0;i<N;i++){
-  if(err)throw err;t=i/fps;draw();
+  if(err)throw err;t=i/fps;await syncVideos(true);draw();
   const fr=new VideoFrame(cv,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});ve.encode(fr,{keyFrame:i%60===0});fr.close();
   while(ve.encodeQueueSize>6)await new Promise(r=>setTimeout(r,4));
   if(i%4===0){setSt('Rendering '+Math.round(i/N*100)+'% · '+W+'×'+H+' MP4 — keep this tab open');ui();await new Promise(r=>setTimeout(r))}}
@@ -2127,7 +2152,7 @@ async function exportRec(W,H,T){ /* fallback for browsers without WebCodecs */
  const mime=['video/mp4;codecs=avc1','video/webm;codecs=vp9,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'',rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12e6}),chunks=[];
  rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);const done=new Promise(r=>rec.onstop=r);t=0;draw();rec.start(250);if(aUrl)aud.play().catch(()=>{});
  const t0=performance.now();
- await new Promise(res=>{(function step(){t=Math.min(T,(performance.now()-t0)/1000);draw();ui();setSt('Recording… '+Math.round(t/T*100)+'% — keep this tab open');t<T?requestAnimationFrame(step):res()})()});
+ await new Promise(res=>{(function step(){t=Math.min(T,(performance.now()-t0)/1000);syncVideos(false);draw();ui();setSt('Recording… '+Math.round(t/T*100)+'% — keep this tab open');t<T?requestAnimationFrame(step):res()})()});
  await new Promise(r=>setTimeout(r,300));rec.stop();aud.pause();await done;
  const ext=mime.includes('mp4')?'mp4':'webm';return 'Done — saved '+save(new Blob(chunks,{type:mime||'video/webm'}),ext,W,H)}
 renderList();draw();
